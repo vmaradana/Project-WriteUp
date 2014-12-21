@@ -1,0 +1,179 @@
+---
+title: "Machine Learning Project WriteUp"
+date: "Saturday, December 13, 2014"
+output: html_document
+---
+
+The goal of your project is to predict the manner in which the the exercise was performed. A high level analysis need to be conducted to undersdtand the  data, followed up by cleanup and attempt at isolating predictors. Preprocess, train and then go for prediction. 
+
+Load libraries
+```{r, }
+library(caret)
+library(kernlab);
+library(plyr)
+library(reshape2)
+library(stats)
+```
+
+### Load raw data
+
+```{r, cache=TRUE}
+## Read Raw Data
+
+##"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+if(!file.exists("pml-training.csv"))
+     download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv","pml-training.csv")
+
+##"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if(!file.exists("pml-testing.csv"))
+     download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv","pml-testing.csv")
+
+srctraining<-read.csv("pml-training.csv")
+srctesting<-read.csv("pml-testing.csv")
+
+idtoprd<-grep("classe",names(srctraining))
+
+str(srctraining)
+```
+
+### Data preparation
+Multiple techniques to preprocess, whcih ever technique used take model from train and apply it on test. Don't reanalyze test data. Guidance here http://topepo.github.io/caret/preprocess.html. We will start with eliminating nearZeroVar columns.
+
+```{r ngv, cache=TRUE}
+##Eliminate near zero variance variables
+nzv <- nearZeroVar(srctraining[,-idtoprd], saveMetrics = TRUE)
+nzvCols<-rownames(nzv[nzv$nzv==TRUE|nzv$zeroVar==TRUE,])
+
+#remove navCols
+indNzvCols<-unlist(sapply(nzvCols,function(x){grep(x,names(srctraining))},USE.NAMES=F))
+trData<-srctraining[,-indNzvCols]
+idtoprd<-grep("classe",names(trData))
+
+```
+
+Based on the above output looks like ther are quite a few columns that have NA. Ther are two possible options, one is to use clean.cases other is to exclude some columns. Since we are dealing with upward of 100 columns will go with remvoing any column tha has NA.
+```{r removeNA, dependson="nzv", cache=TRUE}
+naCols <- sapply(srctraining, function (x) any(is.na(x) | x == ""))
+missingDataCols<-names(srctraining)[naCols]
+
+##combine this to the list of nzv cols and keep it aside to be applied on testing dataset
+colsToExclude<-unique(rbind(nzvCols,missingDataCols))
+```
+
+Next step is to select "belt", "forearm", "arm", "dumbbell" based data columns 
+```{r narrowDS, dependson="removeNA", cache=TRUE}
+
+#remove navCols
+ff<-function(x){
+        print(x)
+        grep(x,names(srctraining))
+        }
+indRmvCols<-unlist(unique(sapply(colsToExclude,function(x){grep(x,names(srctraining))})))
+
+trData<-srctraining[,-indRmvCols]
+idtoprd<-grep("classe",names(trData))
+
+#Check to see what our tr data looks like after excluding nav and na cols 
+
+probCols<-c("belt", "forearm", "arm", "dumbbell")
+
+prCols<-unique(unlist(sapply(probCols,function(x){names(trData)[grep(x,names(trData))]})))
+prColsIdx<-unique(unlist(sapply(probCols,function(x){grep(x,names(trData))})))
+prColsIdx[length(prColsIdx)+1]<-idtoprd
+trData<-trData[,prColsIdx]
+
+
+str(trData)
+```
+
+### Out of Sample Error consideration
+
+In order to minmize out of sample error we will split the source training dataset into a training set and validation test set. By using an algorithm like RandomForest the training set prediction is going to be high but need to watch for overfitting.
+```{r dp, dependson="narrowDS", cache=TRUE}
+set.seed(8309)
+idtoprd<-grep("classe",names(trData))
+inTrain<-createDataPartition(y=trData$classe,
+                               p=0.7, list=FALSE)
+
+training <- trData[inTrain,]
+testing <- trData[-inTrain,]
+```
+
+### Conduct some eploratory analysis using boxplot
+```{r, expanalysis1, fig.height=20,fig.width=20}
+featurePlot(training[,-idtoprd],training$classe,plot="box")
+```
+
+### Preprocessing
+At this point looks like columns have been narrowed down to what we need, so we can proceed to preprocessing. Based on the box plot data has large range, will need to scale and center as a part of preprocessing.
+```{r PreProcess, dependson="dp", cache=TRUE}
+preProc <- preProcess(training[,-idtoprd],method=c("scale","center"))
+trainPC <- predict(preProc,training[,-idtoprd])
+
+```
+
+#### Create another feature plot to see if there are any outliers
+```{r, expanalysis2, fig.height=20,fig.width=20}
+featurePlot(trainPC[,-idtoprd],training$classe,plot="box",ylim=c(-10,10))
+```
+
+### Training
+Build a training model using the Randomforest method.
+```{r train, dependson="PreProcess", cache=TRUE}
+modelFit <- train(training$classe ~ .,method="rf",data=trainPC)
+
+```
+
+Review the Model
+```{r modelreview, dependson="train", cache=TRUE}
+summary(modelFit$finalModel)
+modelFit$finalModel
+varImp(modelFit)
+
+```
+
+### Model validation
+```{r predict, dependson="train", cache=TRUE}
+testPC <- predict(preProc,testing[,-idtoprd])
+confusionMatrix(testing$classe,predict(modelFit,testPC))
+```
+
+Save the model so that we can use it for testing later
+```{r SaveModel, dependson="train", cache=TRUE}
+save(modelFit, file="MLRForsetModel.RData")
+
+```
+
+#### Run the model against the provided test set
+```{r ProjectSubmission, dependson="SaveModel",cache=TRUE}
+load(file="MLRForsetModel.RData", verbose=TRUE)
+submissionTest<-read.csv("pml-testing.csv")
+
+##Preprocess steps similar to training set, start with isolating coloumns
+
+submissionTest<-submissionTest[,-indRmvCols]
+submissionTest<-submissionTest[,prColsIdx]
+names(submissionTest)
+testPC <- predict(preProc,submissionTest[,-idtoprd])
+answers<-predict(modelFit,testPC)
+answers
+
+results<-cbind(submissionTest$problem_id,as.character(answers))
+results
+```
+
+Save answers to a file per the guidlines in the project
+```{r SaveAnswers, dependson="ProjectSubmission", cache=TRUE}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+setwd("./Assignment")
+pml_write_files(answers)
+setwd("..")
+
+```
